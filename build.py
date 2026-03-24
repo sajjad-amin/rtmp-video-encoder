@@ -74,7 +74,7 @@ def build_app():
         pyinstaller_args.append(f"--add-binary={ffmpeg_path};bin")
         
     elif os_name == "darwin": # macOS
-        # ম্যাকের জন্য .icns ব্যবহার করুন
+        os.environ["MACOSX_DEPLOYMENT_TARGET"] = "11.0"
         icon_path = os.path.join(icon_dir, "app_icon.icns")
         if os.path.exists(icon_path):
             pyinstaller_args.append(f"--icon={icon_path}")
@@ -85,7 +85,6 @@ def build_app():
         pyinstaller_args.append(f"--add-binary={ffmpeg_path}:bin")
         
     else: # Linux
-        # লিনাক্সের জন্য আইকন ব্যবহারের নিয়ম ওএসের ওপর নির্ভর করে, কিন্তু ডিফল্ট অ্যাপ আইকন সেট করার জন্য এটুকু যথেষ্ট
         icon_path = os.path.join(icon_dir, "app_icon.ico")
         if os.path.exists(icon_path):
             pyinstaller_args.append(f"--icon={icon_path}")
@@ -101,8 +100,72 @@ def build_app():
     # Run PyInstaller
     print("\nRunning PyInstaller...")
     subprocess.check_call(pyinstaller_args)
+
+    # Cleanup the .spec file
+    spec_file = "RTMPVideoEncoder.spec"
+    if os.path.exists(spec_file):
+        os.remove(spec_file)
+        print(f"Removed {spec_file}")
+
     print("\n✅ Build Completed Successfully!")
     print("Check the 'dist/' folder for your standalone application.")
+
+    # MacOS DMG creation
+    if os_name == "darwin":
+        print("\n📦 Packaging into DMG...")
+        app_path = os.path.abspath('dist/RTMPVideoEncoder.app')
+        dmg_path = os.path.abspath('dist/RTMPVideoEncoder.dmg')
+        # Dynamically creating the dmgbuild settings file based on your provided configuration
+        settings_code = f"""
+import os
+
+format = 'UDBZ'
+size = None
+files = [r'{app_path}']
+symlinks = {{'Applications': '/Applications'}}
+
+# Use icons if available
+if os.path.exists('images/app_icon.icns'):
+    badge_icon = os.path.abspath('images/app_icon.icns')
+    icon = os.path.abspath('images/app_icon.icns')
+
+# Use your generated background image if available, else fallback to builtin arrow
+if os.path.exists('images/dmg_background.png'):
+    background = os.path.abspath('images/dmg_background.png')
+else:
+    background = 'builtin-arrow'
+
+# Window and View settings
+window_rect = ((100, 100), (640, 640))
+default_view = 'icon-view'
+show_status_bar = False
+show_tab_view = False
+show_toolbar = False
+show_pathbar = False
+show_sidebar = False
+
+# Positioning your App and Applications folder
+icon_locations = {{
+    'RTMPVideoEncoder.app': (175, 324),
+    'Applications': (465, 324)
+}}
+
+text_size = 14
+icon_size = 120
+"""
+        with open("dmg_settings.py", "w") as f:
+            f.write(settings_code)
+        
+        # Run dmgbuild
+        try:
+            subprocess.check_call(["dmgbuild", "-s", "dmg_settings.py", "RTMP Video Encoder", dmg_path])
+            print(f"✅ DMG created successfully: {dmg_path}")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to create DMG: {e}")
+        finally:
+            # Cleanup
+            if os.path.exists("dmg_settings.py"):
+                os.remove("dmg_settings.py")
 
 if __name__ == "__main__":
     check_dependencies()
