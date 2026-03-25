@@ -28,10 +28,7 @@ def get_ffprobe_path():
         return exe_name
     return ffprobe_path
 
-def get_video_bitrate(file_path):
-    """
-    Extracts the original bitrate using ffprobe to stop file size inflation on hardware encoding.
-    """
+def get_video_height(file_path):
     ffprobe_cmd = get_ffprobe_path()
     try:
         startupinfo = None
@@ -39,7 +36,49 @@ def get_video_bitrate(file_path):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
-        # Try finding bitrate specifically from video stream
+        cmd = [
+            ffprobe_cmd, "-v", "error", "-select_streams", "v:0", 
+            "-show_entries", "stream=height", "-of", "default=noprint_wrappers=1:nokey=1", 
+            file_path
+        ]
+        out = subprocess.check_output(cmd, startupinfo=startupinfo, universal_newlines=True).strip()
+        if out and out.isdigit():
+            return int(out)
+    except Exception:
+        pass
+    return None
+
+def get_video_framerate(file_path):
+    ffprobe_cmd = get_ffprobe_path()
+    try:
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+        cmd = [
+            ffprobe_cmd, "-v", "error", "-select_streams", "v:0", 
+            "-show_entries", "stream=r_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1", 
+            file_path
+        ]
+        out = subprocess.check_output(cmd, startupinfo=startupinfo, universal_newlines=True).strip()
+        if out and '/' in out:
+            num, den = out.split('/')
+            return float(num) / float(den)
+        elif out.isdigit():
+            return float(out)
+    except Exception:
+        pass
+    return None
+
+def get_video_bitrate(file_path):
+    ffprobe_cmd = get_ffprobe_path()
+    try:
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
         cmd = [
             ffprobe_cmd, "-v", "error", "-select_streams", "v:0", 
             "-show_entries", "stream=bit_rate", "-of", "default=noprint_wrappers=1:nokey=1", 
@@ -49,7 +88,6 @@ def get_video_bitrate(file_path):
         if out and out.isdigit():
             return int(out)
             
-        # Fallback to general container format bitrate
         cmd = [
             ffprobe_cmd, "-v", "error", 
             "-show_entries", "format=bit_rate", "-of", "default=noprint_wrappers=1:nokey=1", 
@@ -92,24 +130,23 @@ def get_available_hw_encoders():
         return []
 
 class ConverterThread(QThread):
-    progress_updated = pyqtSignal(int, int, str, str) # row, progress_percentage, elapsed_str, est_str
-    conversion_finished = pyqtSignal(int, bool, str) # row, success, txt
-    encoder_detected = pyqtSignal(int, str) # row, encoder_name
+    progress_updated = pyqtSignal(int, int, str, str)
+    conversion_finished = pyqtSignal(int, bool, str)
+    encoder_detected = pyqtSignal(int, str)
 
-    def __init__(self, row, source_path, dest_path, encoder_selection, parent=None):
+    def __init__(self, row, source_path, dest_path, encoder_selection, resolution_selection, framerate_selection, parent=None):
         super().__init__(parent)
         self.row = row
         self.source_path = source_path
         self.dest_path = dest_path
         self.encoder_selection = encoder_selection
+        self.resolution_selection = resolution_selection
+        self.framerate_selection = framerate_selection
         self.process = None
         self._is_cancelled = False
         self._is_paused = False
 
     def toggle_pause(self):
-        """
-        Suspend or Resume the OS-level subprocess using psutil.
-        """
         if not self.process:
             return self._is_paused
             
@@ -130,8 +167,9 @@ class ConverterThread(QThread):
         ffmpeg_exe = get_ffmpeg_path()
         selected_encoder = self.encoder_selection
 
+        self.progress_updated.emit(self.row, 0, "00:00:00", "00:00:00")
+
         if selected_encoder == "Auto-Detect (Best Available)":
-            self.progress_updated.emit(self.row, 0, "00:00:00", "00:00:00")
             available = get_available_hw_encoders()
             if "h264_nvenc" in available:
                 selected_encoder = "NVIDIA NVENC (h264_nvenc)"
@@ -144,19 +182,66 @@ class ConverterThread(QThread):
             else:
                 selected_encoder = "CPU (libx264)"
         
-        # Broadcast the verified encoder up to the main UI Combobox!
         self.encoder_detected.emit(self.row, selected_encoder)
 
-        # Set specific flags for the chosen encoder
-        # Hardware encoders rely on precise b:v metrics to ensure the file doesn't needlessly balloon in size
+        # --- Resolution Logic ---
+        target_height = None
+        if self.resolution_selection != "Auto (Same as Source)":
+            match = re.search(r'(\d+)p', self.resolution_selection)
+            if match:
+                target_height = int(match.group(1))
+
+        source_height = get_video_height(self.source_path)
+        vf_params = []
+        bitrate_scale_factor = 1.0
+        
+        if target_height:
+            if source_height:
+                if source_height > target_height:
+                    vf_params = ["-vf", f"scale=-2:{target_height}"]
+                    bitrate_scale_factor = (target_height / source_height)
+            else:
+                vf_params = ["-vf", f"scale=-2:{target_height}"]
+
+        # --- Constant Framing Parameter (CFR) ---
+        r_params = []
+        
+        if self.framerate_selection.strip().lower() == "default":
+            source_fps = get_video_framerate(self.source_path)
+            
+            # Safe standard broadcast framerates suitable natively for RTMP (allow slight floating point parsing inaccuracies)
+            safe_framerates = [23.976, 23.98, 24, 25, 29.97, 30, 50, 59.94, 60]
+            final_fps = 30
+            
+            if source_fps:
+                # Check if it aligns with a standard safe constant framerate within 0.1 variance
+                is_safe = any(abs(source_fps - s) < 0.1 for s in safe_framerates)
+                
+                # If parsed VFR exists natively over bound limitations securely enforce fallback to 30.
+                if source_fps > 60.0 or not is_safe:
+                    final_fps = 30
+                else:
+                    # Target safe rounding execution
+                    final_fps = round(source_fps, 3)
+                    
+            r_params = ["-r", str(final_fps), "-fps_mode", "cfr"]
+            
+        else:
+            # Explicit standard manual choice extraction
+            match = re.search(r'([\d\.]+)', self.framerate_selection)
+            if match:
+                r_params = ["-r", match.group(1), "-fps_mode", "cfr"]
+
+        # --- Encoder and Bitrate Generation ---
         if selected_encoder != "CPU (libx264)":
-            self.progress_updated.emit(self.row, 0, "00:00:00", "00:00:00")
             bitrate_bps = get_video_bitrate(self.source_path)
             
             if bitrate_bps is None:
-                bitrate_bps = 3000000 # Fallback 3Mbps if totally unknown 
+                bitrate_bps = 3000000 
             
-            # Convert to kbps and add some headroom / maxrate buffer
+            bitrate_bps = int(bitrate_bps * bitrate_scale_factor)
+            bitrate_bps = max(bitrate_bps, 300000)
+            
             kbps = int(bitrate_bps / 1000)
             target_bitrate = f"{kbps}k"
             max_bitrate = f"{int(kbps * 1.25)}k"
@@ -175,18 +260,17 @@ class ConverterThread(QThread):
                 v_codec = "h264_amf"
                 v_params = ["-quality", "speed"] + v_params
         else: 
-            # Traditional CPU fallback
             v_codec = "libx264"
             v_params = ["-preset", "fast", "-crf", "23"]
-
-        self.progress_updated.emit(self.row, 0, "00:00:00", "00:00:00")
 
         cmd = [
             ffmpeg_exe,
             "-y",
             "-i", self.source_path,
+            *vf_params,
             "-c:v", v_codec,
             *v_params,
+            *r_params,
             "-c:a", "aac",
             "-movflags", "+faststart",
             self.dest_path
@@ -205,10 +289,10 @@ class ConverterThread(QThread):
                 startupinfo=startupinfo
             )
         except FileNotFoundError:
-            self.conversion_finished.emit(self.row, False, f"FFmpeg Executable '{ffmpeg_exe}' not found! Ensure it resides in the 'bin/' folder or PATH.")
+            self.conversion_finished.emit(self.row, False, f"FFmpeg Executable not found locally! Expected mapping: {ffmpeg_exe}")
             return
         except Exception as e:
-            self.conversion_finished.emit(self.row, False, f"Failed to start FFmpeg: {str(e)}")
+            self.conversion_finished.emit(self.row, False, f"Failed to start native FFmpeg hook: {str(e)}")
             return
 
         duration_regex = re.compile(r"Duration: (\d{2}):(\d{2}):(\d{2}\.\d+)")
@@ -228,7 +312,6 @@ class ConverterThread(QThread):
                 self.conversion_finished.emit(self.row, False, "Conversion cancelled by user.")
                 return
 
-            # Keep Python loop running idly while the external native process is suspended.
             if self._is_paused:
                 if pause_start_time is None:
                     pause_start_time = time.time()
@@ -239,7 +322,6 @@ class ConverterThread(QThread):
                     paused_duration += (time.time() - pause_start_time)
                     pause_start_time = None
 
-            # Reading chunks byte by byte ensures \r carriage returns output correctly.
             char = self.process.stderr.read(1)
             if not char:
                 if self.process.poll() is not None:
@@ -287,13 +369,12 @@ class ConverterThread(QThread):
             
         if self.process.returncode == 0:
             self.progress_updated.emit(self.row, 100, "00:00:00", "00:00:00")
-            self.conversion_finished.emit(self.row, True, f"Conversion completed successfully.")
+            self.conversion_finished.emit(self.row, True, "Completed Successfully.")
         else:
             self.conversion_finished.emit(self.row, False, f"FFmpeg error (code {self.process.returncode}).")
 
     def cancel(self):
         self._is_cancelled = True
-        # If process is completely suspended in memory by OS, it must be awakened before termination can register
         if self._is_paused:
             try:
                 psutil.Process(self.process.pid).resume()

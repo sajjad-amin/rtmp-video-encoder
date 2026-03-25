@@ -2,7 +2,7 @@ import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QTableWidget, 
-                             QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox, QComboBox, QLineEdit)
+                             QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox, QComboBox, QLineEdit, QSizePolicy)
 from PyQt6.QtCore import Qt
 from converter import ConverterThread
 
@@ -24,24 +24,35 @@ class RTMPVideoEncoderApp(QMainWindow):
         layout = QVBoxLayout()
         central_widget.setLayout(layout)
         
-        # --- Row 1: Source & Dest ---
+        # --- Row 1: Source & Dest (50% - 50%) ---
         row1_layout = QHBoxLayout()
-        self.browse_btn = QPushButton("Browse Sources (Multiple)")
-        self.browse_btn.clicked.connect(self.browse_sources)
         
+        source_layout = QHBoxLayout()
+        self.source_dir_input = QLineEdit()
+        self.source_dir_input.setReadOnly(True)
+        self.source_dir_input.setPlaceholderText("Source Directory...")
+        self.browse_btn = QPushButton("Browse Sources")
+        self.browse_btn.clicked.connect(self.browse_sources)
+        source_layout.addWidget(self.source_dir_input)
+        source_layout.addWidget(self.browse_btn)
+
+        dest_layout = QHBoxLayout()
         self.dest_folder_input = QLineEdit()
         self.dest_folder_input.setReadOnly(True)
-        self.dest_folder_input.setPlaceholderText("Destination Folder (Default: Same as Source Directory)")
-        self.dest_folder_btn = QPushButton("Select Destination")
+        self.dest_folder_input.setPlaceholderText("Target Directory (Default: Match Source)")
+        self.dest_folder_btn = QPushButton("Select Dest")
         self.dest_folder_btn.clicked.connect(self.select_destination_folder)
+        dest_layout.addWidget(self.dest_folder_input)
+        dest_layout.addWidget(self.dest_folder_btn)
         
-        row1_layout.addWidget(self.browse_btn)
-        row1_layout.addWidget(self.dest_folder_input)
-        row1_layout.addWidget(self.dest_folder_btn)
+        # Make them share exactly 50% of the horizontal space dynamically
+        row1_layout.addLayout(source_layout, 1)
+        row1_layout.addLayout(dest_layout, 1)
         
-        # --- Row 2: Engine & Remove ---
+        # --- Row 2: Parameters & UI Engine ---
         row2_layout = QHBoxLayout()
-        encoder_label = QLabel("Encoding Engine:")
+        
+        encoder_label = QLabel("Engine:")
         self.encoder_combo = QComboBox()
         self.encoder_combo.addItems([
             "Auto-Detect (Best Available)",
@@ -52,11 +63,45 @@ class RTMPVideoEncoderApp(QMainWindow):
             "AMD AMF (h264_amf)"
         ])
         
+        res_label = QLabel("Res:")
+        self.res_combo = QComboBox()
+        self.res_combo.addItems([
+            "Auto (Same as Source)",
+            "2160p (4K)",
+            "1440p",
+            "1080p",
+            "720p",
+            "480p",
+            "360p",
+            "240p",
+            "144p"
+        ])
+        
+        fps_label = QLabel("FPS:")
+        self.fps_combo = QComboBox()
+        self.fps_combo.setEditable(True)
+        self.fps_combo.setToolTip("Type a custom framerate or pick an option")
+        self.fps_combo.addItems([
+            "Default",
+            "60",
+            "30",
+            "25",
+            "24"
+        ])
+        # Default the combobox reliably to strictly RTMP CFR behavior implicitly
+        self.fps_combo.setCurrentText("Default")
+        
         self.remove_btn = QPushButton("Remove Selected")
         self.remove_btn.clicked.connect(self.remove_selected)
         
         row2_layout.addWidget(encoder_label)
         row2_layout.addWidget(self.encoder_combo)
+        row2_layout.addSpacing(10)
+        row2_layout.addWidget(res_label)
+        row2_layout.addWidget(self.res_combo)
+        row2_layout.addSpacing(10)
+        row2_layout.addWidget(fps_label)
+        row2_layout.addWidget(self.fps_combo)
         row2_layout.addStretch()
         row2_layout.addWidget(self.remove_btn)
         
@@ -120,6 +165,9 @@ class RTMPVideoEncoderApp(QMainWindow):
         file_filter = "Video Files (*.mp4 *.mkv *.avi *.mov *.flv *.ts);;All Files (*)"
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Select Source Videos", "", file_filter)
         
+        if file_paths:
+            self.source_dir_input.setText(os.path.dirname(file_paths[0]))
+            
         dest_dir = self.dest_folder_input.text()
         
         for file_path in file_paths:
@@ -171,14 +219,18 @@ class RTMPVideoEncoderApp(QMainWindow):
         self.remove_btn.setEnabled(False)
         self.dest_folder_btn.setEnabled(False)
         self.encoder_combo.setEnabled(False) 
+        self.res_combo.setEnabled(False)
+        self.fps_combo.setEnabled(False)
         
         source = self.table.item(pending_row, 0).text()
         dest = self.table.item(pending_row, 1).text()
         encoder_selection = self.encoder_combo.currentText()
+        res_selection = self.res_combo.currentText()
+        fps_selection = self.fps_combo.currentText()
         
         self.table.item(pending_row, 2).setText("Starting...")
         
-        self.thread = ConverterThread(pending_row, source, dest, encoder_selection, parent=self)
+        self.thread = ConverterThread(pending_row, source, dest, encoder_selection, res_selection, fps_selection, parent=self)
         self.thread.progress_updated.connect(self.update_progress)
         self.thread.conversion_finished.connect(self.conversion_done)
         self.thread.encoder_detected.connect(self.update_encoder_combo)
@@ -249,9 +301,12 @@ class RTMPVideoEncoderApp(QMainWindow):
         self.pause_btn.setText("Pause")
         self.cancel_btn.setEnabled(False)
         self.encoder_combo.setEnabled(True)
+        self.res_combo.setEnabled(True)
+        self.fps_combo.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.remove_btn.setEnabled(True)
         self.dest_folder_btn.setEnabled(True)
+        self.source_dir_input.setText("")
         self.time_label.setText("Elapsed: 00:00:00 | Estimated: 00:00:00")
 
     def closeEvent(self, event):

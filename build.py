@@ -6,8 +6,13 @@ import subprocess
 
 def check_dependencies():
     print("Ensuring dependencies are installed...")
+    deps = ["pyinstaller", "psutil", "PyQt6"]
+    
+    if platform.system().lower() == "darwin":
+        deps.append("dmgbuild")
+        
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller", "psutil", "PyQt6"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install"] + deps)
     except subprocess.CalledProcessError:
         print("Failed to install dependencies. Please check your internet connection.")
         sys.exit(1)
@@ -112,60 +117,81 @@ def build_app():
 
     # MacOS DMG creation
     if os_name == "darwin":
-        print("\n📦 Packaging into DMG...")
+        print("\n📦 Packaging into DMG using native create-dmg...")
+        
+        # 1. Paths Setup
         app_path = os.path.abspath('dist/RTMPVideoEncoder.app')
         dmg_path = os.path.abspath('dist/RTMPVideoEncoder.dmg')
-        # Dynamically creating the dmgbuild settings file based on your provided configuration
-        settings_code = f"""
-import os
+        bg_path_abs = os.path.abspath(os.path.join('images', 'dmg_background.png'))
+        icon_path_abs = os.path.abspath(os.path.join('images', 'app_icon.icns'))
 
-format = 'UDBZ'
-size = None
-files = [r'{app_path}']
-symlinks = {{'Applications': '/Applications'}}
+        # 2. Check if create-dmg is installed
+        if not shutil.which("create-dmg"):
+            print("❌ 'create-dmg' is not installed on your Mac.")
+            print("💡 Please open terminal and run: brew install create-dmg")
+            print("Then run this build script again.")
+            return
 
-# Use icons if available
-if os.path.exists('images/app_icon.icns'):
-    badge_icon = os.path.abspath('images/app_icon.icns')
-    icon = os.path.abspath('images/app_icon.icns')
+        # 3. Create a Staging Directory (Required for create-dmg)
+        staging_dir = os.path.abspath('dist/dmg_staging')
+        if os.path.exists(staging_dir):
+            shutil.rmtree(staging_dir)
+        os.makedirs(staging_dir)
 
-# Use your generated background image if available, else fallback to builtin arrow
-if os.path.exists('images/dmg_background.png'):
-    background = os.path.abspath('images/dmg_background.png')
-else:
-    background = 'builtin-arrow'
+        # 4. Copy the .app into the staging directory (Preserving Symlinks)
+        dest_app_path = os.path.join(staging_dir, 'RTMPVideoEncoder.app')
+        shutil.copytree(app_path, dest_app_path, symlinks=True)
 
-# Window and View settings
-window_rect = ((100, 100), (640, 640))
-default_view = 'icon-view'
-show_status_bar = False
-show_tab_view = False
-show_toolbar = False
-show_pathbar = False
-show_sidebar = False
-
-# Positioning your App and Applications folder
-icon_locations = {{
-    'RTMPVideoEncoder.app': (175, 324),
-    'Applications': (465, 324)
-}}
-
-text_size = 14
-icon_size = 120
-"""
-        with open("dmg_settings.py", "w") as f:
-            f.write(settings_code)
-        
-        # Run dmgbuild
+        # 4.1 Fix Code Signature for Apple Silicon (M-series Macs)
+        print("🔐 Re-signing the app bundle to prevent crashes...")
         try:
-            subprocess.check_call(["dmgbuild", "-s", "dmg_settings.py", "RTMP Video Encoder", dmg_path])
+            subprocess.check_call(["codesign", "--force", "--deep", "-s", "-", dest_app_path])
+            print("✅ Code signing successful!")
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️ Warning: Code signing failed: {e}")
+
+        # 5. Remove existing DMG if it exists to avoid conflicts
+        if os.path.exists(dmg_path):
+            os.remove(dmg_path)
+
+        # 6. Construct create-dmg command
+        cmd = [
+            "create-dmg",
+            "--volname", "RTMP Video Encoder",
+            "--window-pos", "200", "120",
+            "--window-size", "640", "640",
+            "--icon-size", "120",
+            "--text-size", "14",
+            "--icon", "RTMPVideoEncoder.app", "175", "324",
+            "--hide-extension", "RTMPVideoEncoder.app",
+            "--app-drop-link", "465", "324"
+        ]
+
+        # Add background if exists
+        if os.path.exists(bg_path_abs):
+            cmd.extend(["--background", bg_path_abs])
+            print(f"✅ Found Background Image: {bg_path_abs}")
+        else:
+            print(f"⚠️ Warning: Background image not found at {bg_path_abs}")
+
+        # Add volume icon if exists
+        if os.path.exists(icon_path_abs):
+            cmd.extend(["--volicon", icon_path_abs])
+            print(f"✅ Found Volume Icon: {icon_path_abs}")
+
+        cmd.extend([dmg_path, staging_dir])
+
+        # 7. Execute create-dmg
+        try:
+            print("Running create-dmg (This might take a minute)...")
+            subprocess.check_call(cmd)
             print(f"✅ DMG created successfully: {dmg_path}")
         except subprocess.CalledProcessError as e:
             print(f"❌ Failed to create DMG: {e}")
         finally:
-            # Cleanup
-            if os.path.exists("dmg_settings.py"):
-                os.remove("dmg_settings.py")
+            # 8. Clean up staging directory
+            if os.path.exists(staging_dir):
+                shutil.rmtree(staging_dir)
 
 if __name__ == "__main__":
     check_dependencies()
